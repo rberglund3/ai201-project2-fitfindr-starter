@@ -157,6 +157,7 @@ flowchart TD
     CallFitCard --> SetCard[State: fit_card = result]
     SetCard --> Combine[Combine Data & Format Response]
     Combine --> FinalReturn([Return complete response to User])
+```
 
 ---
 
