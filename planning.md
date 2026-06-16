@@ -139,6 +139,7 @@ For each tool, describe the specific failure mode you're handling and what the a
      sketch are all fine. You'll share this diagram with an AI tool when asking it to implement
      the planning loop and each individual tool. -->
 
+```mermaid
 flowchart TD
     User([User Query]) --> Planner[Planning Loop]
     Planner --> CallSearch[search_listings]
