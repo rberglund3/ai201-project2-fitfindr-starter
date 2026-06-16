@@ -43,8 +43,38 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
            string and return it along with session["outfit_suggestion"] and
            session["fit_card"].
     """
-    # TODO: implement this function
-    return "Agent not yet implemented.", "", ""
+    # 1. Guard against an empty query.
+    if not user_query or not user_query.strip():
+        return "Please describe what you're looking for first. 🙂", "", ""
+
+    # 2. Select the wardrobe based on the radio choice.
+    if wardrobe_choice == "Empty wardrobe (new user)":
+        wardrobe = get_empty_wardrobe()
+    else:
+        wardrobe = get_example_wardrobe()
+
+    # 3. Run the agent planning loop.
+    session = run_agent(user_query.strip(), wardrobe)
+
+    # 4. Error / no-results branch → show message, clear the other two panels.
+    if session["error"]:
+        return f"😕 {session['error']}", "", ""
+
+    # 5. Format the selected listing into a readable Markdown block.
+    item = session["selected_item"]
+    brand = item.get("brand") or "Unbranded"
+    colors = ", ".join(item.get("colors", [])) or "n/a"
+    tags = ", ".join(item.get("style_tags", [])) or "n/a"
+    listing_text = (
+        f"**{item.get('title', 'Untitled')}**\n\n"
+        f"💲 ${item.get('price', '?'):g}  ·  🏷️ {brand}  ·  🛒 {item.get('platform', 'n/a')}\n\n"
+        f"**Size:** {item.get('size', 'n/a')}  ·  **Condition:** {item.get('condition', 'n/a')}\n"
+        f"**Category:** {item.get('category', 'n/a')}  ·  **Colors:** {colors}\n"
+        f"**Style:** {tags}\n\n"
+        f"{item.get('description', '')}"
+    )
+
+    return listing_text, session["outfit_suggestion"], session["fit_card"]
 
 
 # ── interface ─────────────────────────────────────────────────────────────────
@@ -82,20 +112,20 @@ Describe what you're looking for — include size and price if you want to filte
         submit_btn = gr.Button("Find it", variant="primary")
 
         with gr.Row():
-            listing_output = gr.Textbox(
+            listing_output = gr.Markdown(
                 label="🛍️ Top listing found",
-                lines=8,
-                interactive=False,
+                show_label=True,
+                container=True,
             )
-            outfit_output = gr.Textbox(
+            outfit_output = gr.Markdown(
                 label="👗 Outfit idea",
-                lines=8,
-                interactive=False,
+                show_label=True,
+                container=True,
             )
-            fitcard_output = gr.Textbox(
+            fitcard_output = gr.Markdown(
                 label="✨ Your fit card",
-                lines=8,
-                interactive=False,
+                show_label=True,
+                container=True,
             )
 
         gr.Examples(

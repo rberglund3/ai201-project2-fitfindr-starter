@@ -18,7 +18,72 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import json
+import re
+
+import tools
 from tools import search_listings, suggest_outfit, create_fit_card
+
+
+# ── query parsing ───────────────────────────────────────────────────────────────
+
+_PARSE_SYSTEM = (
+    "You extract structured search parameters from a shopper's request for "
+    "secondhand clothing. Respond with ONLY a JSON object — no prose, no code "
+    "fences — with exactly these keys:\n"
+    '  "description": string of keywords describing the item (never null),\n'
+    '  "size": the size string if one is mentioned, else null,\n'
+    '  "max_price": a number if a price ceiling is mentioned, else null.\n'
+    'Example: {"description": "vintage graphic tee", "size": "M", "max_price": 30}'
+)
+
+
+def _parse_query_regex(query: str) -> dict:
+    """Deterministic fallback parser used when the LLM is unavailable."""
+    # Max price: "$30", "under 30", "30 dollars", etc.
+    price = None
+    price_match = re.search(r"\$?\s*(\d+(?:\.\d+)?)\s*(?:dollars|usd|bucks)?", query)
+    if price_match and re.search(r"under|less than|below|cheaper|\$|max|budget", query, re.I):
+        price = float(price_match.group(1))
+
+    # Size: "size M", "size US 9", "in a medium".
+    size = None
+    size_match = re.search(r"\bsize\s+([A-Za-z0-9/ ]+?)(?:\s*(?:under|below|less|$|,|\.))", query, re.I)
+    if size_match:
+        size = size_match.group(1).strip()
+
+    return {"description": query.strip(), "size": size, "max_price": price}
+
+
+def _parse_query(query: str) -> dict:
+    """
+    Extract {description, size, max_price} from a natural language query.
+
+    Tries the Groq LLM for robust parsing and falls back to a regex parser if
+    the call fails or returns something unusable. Always returns a dict with all
+    three keys, with a non-empty description.
+    """
+    try:
+        raw = tools._chat(
+            [
+                {"role": "system", "content": _PARSE_SYSTEM},
+                {"role": "user", "content": query},
+            ],
+            temperature=0.0,
+        )
+        # Strip any accidental code fences before parsing.
+        raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
+        parsed = json.loads(raw)
+
+        description = (parsed.get("description") or "").strip() or query.strip()
+        size = parsed.get("size")
+        size = str(size).strip() if size else None
+        max_price = parsed.get("max_price")
+        max_price = float(max_price) if isinstance(max_price, (int, float)) else None
+
+        return {"description": description, "size": size, "max_price": max_price}
+    except Exception:
+        return _parse_query_regex(query)
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -92,9 +157,44 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
+    # Step 1: fresh session — the single source of truth for this interaction.
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 2: parse the natural language query into search parameters.
+    parsed = _parse_query(query)
+    session["parsed"] = parsed
+
+    # Step 3: search the listings with the parsed parameters.
+    results = search_listings(
+        description=parsed["description"],
+        size=parsed["size"],
+        max_price=parsed["max_price"],
+    )
+    session["search_results"] = results
+
+    # Conditional branch: no matches → friendly error, return early.
+    # No other tools are called in this case.
+    if not results:
+        session["error"] = (
+            "Sorry, I couldn't find any listings matching that. Try loosening "
+            "the price, size, or describing the item a little differently."
+        )
+        return session
+
+    # Step 4: select the top result and thread it through the next tools.
+    session["selected_item"] = results[0]
+
+    # Step 5: suggest an outfit using the selected item and the user's wardrobe.
+    session["outfit_suggestion"] = suggest_outfit(
+        session["selected_item"], wardrobe
+    )
+
+    # Step 6: build a shareable fit card from the outfit and the selected item.
+    session["fit_card"] = create_fit_card(
+        session["outfit_suggestion"], session["selected_item"]
+    )
+
+    # Step 7: return the populated session.
     return session
 
 
