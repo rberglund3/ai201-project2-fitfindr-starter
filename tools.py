@@ -13,6 +13,7 @@ Tools:
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -24,6 +25,9 @@ load_dotenv()
 
 # ── Groq client ───────────────────────────────────────────────────────────────
 
+_MODEL = "llama-3.3-70b-versatile"
+
+
 def _get_groq_client():
     """Initialize and return a Groq client using GROQ_API_KEY from .env."""
     api_key = os.environ.get("GROQ_API_KEY")
@@ -32,6 +36,17 @@ def _get_groq_client():
             "GROQ_API_KEY not set. Add it to a .env file in the project root."
         )
     return Groq(api_key=api_key)
+
+
+def _chat(messages: list[dict], temperature: float = 0.5) -> str:
+    """Run a chat completion against the Groq model and return its text."""
+    client = _get_groq_client()
+    response = client.chat.completions.create(
+        model=_MODEL,
+        messages=messages,
+        temperature=temperature,
+    )
+    return response.choices[0].message.content.strip()
 
 
 # ── Tool 1: search_listings ───────────────────────────────────────────────────
@@ -69,8 +84,47 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+
+    # Keywords from the user's description (lowercased, deduped).
+    keywords = {kw for kw in re.findall(r"[a-z0-9']+", (description or "").lower())}
+
+    size_query = size.strip().lower() if size else None
+
+    results = []
+    for listing in listings:
+        # Filter: price ceiling (inclusive).
+        if max_price is not None and listing.get("price", 0) > max_price:
+            continue
+
+        # Filter: size (case-insensitive substring, so "M" matches "S/M").
+        if size_query:
+            listing_size = str(listing.get("size", "")).lower()
+            if size_query not in listing_size:
+                continue
+
+        # Score: keyword overlap across the listing's searchable text fields.
+        haystack = " ".join(
+            [
+                str(listing.get("title", "")),
+                str(listing.get("description", "")),
+                str(listing.get("category", "")),
+                str(listing.get("brand") or ""),
+                " ".join(listing.get("style_tags", [])),
+                " ".join(listing.get("colors", [])),
+            ]
+        ).lower()
+        haystack_words = set(re.findall(r"[a-z0-9']+", haystack))
+
+        score = len(keywords & haystack_words)
+        if score == 0:
+            continue
+
+        results.append((score, listing))
+
+    # Sort by score, highest first. Stable sort preserves dataset order on ties.
+    results.sort(key=lambda pair: pair[0], reverse=True)
+    return [listing for _, listing in results]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -100,8 +154,58 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    item_desc = (
+        f"{new_item.get('title', 'this item')} "
+        f"(category: {new_item.get('category', 'unknown')}, "
+        f"colors: {', '.join(new_item.get('colors', [])) or 'n/a'}, "
+        f"style: {', '.join(new_item.get('style_tags', [])) or 'n/a'})"
+    )
+
+    items = wardrobe.get("items") if isinstance(wardrobe, dict) else None
+
+    if not items:
+        # Empty / missing wardrobe → general styling advice around universal basics.
+        prompt = (
+            f"A shopper is considering this secondhand item: {item_desc}.\n\n"
+            "They haven't told us what's in their wardrobe yet. Suggest 1-2 complete "
+            "outfit ideas built around this item using universal basics most people "
+            "own (e.g. blue jeans, a white tee, white sneakers, a denim jacket). "
+            "Be concrete and encouraging. Keep it under 120 words."
+        )
+    else:
+        wardrobe_lines = "\n".join(
+            f"- {it.get('name', 'item')} "
+            f"({it.get('category', '?')}; "
+            f"{', '.join(it.get('colors', [])) or 'n/a'}; "
+            f"{', '.join(it.get('style_tags', [])) or 'n/a'})"
+            for it in items
+        )
+        prompt = (
+            f"A shopper is considering this secondhand item: {item_desc}.\n\n"
+            f"Here is their current wardrobe:\n{wardrobe_lines}\n\n"
+            "Suggest 1-2 complete outfits that pair the new item with specific, "
+            "named pieces from their wardrobe. Reference the wardrobe items by name. "
+            "Be concrete and encouraging. Keep it under 150 words."
+        )
+
+    try:
+        return _chat(
+            [
+                {
+                    "role": "system",
+                    "content": "You are a friendly, practical personal stylist.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.6,
+        )
+    except Exception:
+        # API failure → safe, non-empty fallback so the agent loop keeps working.
+        return (
+            f"Style {new_item.get('title', 'this piece')} with timeless basics: "
+            "a pair of blue jeans, a crisp white tee, and white sneakers. Add a "
+            "denim or leather jacket to dress it up or down."
+        )
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -133,5 +237,44 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    title = new_item.get("title", "this find")
+    price = new_item.get("price")
+    price_str = f"${price:g}" if isinstance(price, (int, float)) else "a steal"
+    brand = new_item.get("brand") or "no-name"
+    platform = new_item.get("platform", "secondhand")
+
+    if not outfit or not outfit.strip():
+        # No outfit context → just hype the item details, don't mention an outfit.
+        prompt = (
+            f"Write a casual, authentic 2-4 sentence social caption hyping this "
+            f"thrifted find: {title}, {brand}, snagged for {price_str} on {platform}. "
+            "Mention the name, price, and platform naturally (once each). Do NOT "
+            "describe any outfit or other clothing — focus only on the find itself."
+        )
+    else:
+        prompt = (
+            f"Write a casual, authentic 2-4 sentence OOTD-style caption (like a real "
+            f"Instagram/TikTok post, not a product description).\n\n"
+            f"The thrifted item: {title}, {brand}, {price_str}, from {platform}.\n"
+            f"The outfit: {outfit}\n\n"
+            "Mention the item name, price, and platform naturally (once each), and "
+            "capture the outfit vibe in specific terms."
+        )
+
+    try:
+        return _chat(
+            [
+                {
+                    "role": "system",
+                    "content": "You write fun, authentic secondhand-fashion captions.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+        )
+    except Exception:
+        # API failure → safe, non-empty fallback caption.
+        return (
+            f"Just thrifted {title} for {price_str} on {platform} — obsessed. "
+            "Secondhand gems hit different. ♻️"
+        )
